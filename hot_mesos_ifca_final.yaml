@@ -1,0 +1,607 @@
+heat_template_version: 2013-05-23
+
+description: >
+  TOSCA example for specifying a Mesos Cluster
+
+parameters:
+  cms_stageoutsite_fallback:
+    type: string
+    default: DUMMY
+  iam_token:
+    type: string
+    default: my_token
+  cms_local_site:
+    type: string
+    default: T2_ES_IFCA
+  cms_stageoutprefix_fallback:
+    type: string
+    default: DUMMY
+  imageCMS:
+    type: string
+    description: Image used to boot a server
+#    default: ubuntu16-heat-ifca[Nov-2017]
+#    default: fedora-software-config-ifca
+    default: ubuntu16-software-config-ifca
+#    default: ubuntu-software-config-test
+  cms_stageoutserver:
+    type: string
+    default: srmfe01.ifca.es
+  cms_stageoutserver_fallback:
+    type: string
+    default: DUMMY
+  cms_input_path:
+    type: string
+    default: DUMMY
+  elasticsearch_secret:
+    type: string
+    default: 5z0O87gnSf
+  onedatacache:
+    type: string
+    default: 160.44.194.19
+  onedatatoken:
+    type: string
+    default: DUMMYTOKEN
+  cms_stageoutsite:
+    type: string
+    default: T2_ES_IFCA
+  cms_input_protocol:
+    type: string
+    default: xrootd
+  monitordb_ip:
+    type: string
+    default: 193.205.222.247:8080
+  iam_client_secret:
+    type: string
+    default: myclient_secret
+  iam_client_id:
+    type: string
+    default: myclient_id
+  cms_stageoutprefix:
+    type: string
+    default: srm://srmfe02.ifca.es:8444/srm/managerv2?SFN=/cmsdisk/
+  networkCMS:
+    type: string
+    description: Network ID for the servers
+    default: 2b729f05-cda2-4316-bab6-4247aa06d708
+  subnetCMS:
+    type: string
+    description: Sub Network ID for the servers
+    default: daac11bd-9f18-4256-a22d-faa2939b221e
+  key_name:
+    type: string
+    description: Name of keypair to assign to servers
+    default: heat-proxy
+ 
+resources:
+  mesos-master-server:
+    type: OS::Nova::Server
+    properties:
+      name: mesos-master-server
+      admin_pass: admin
+      flavor: cm4.xlarge
+      user_data_format: SOFTWARE_CONFIG
+      image: { get_param: imageCMS } 
+      key_name: { get_param: key_name }
+      networks: 
+     # - network: { get_param: networkCMS }
+        - port: { get_resource: server1_port }
+  server1_port:
+    type: OS::Neutron::Port
+    properties:
+      network_id: { get_param: networkCMS }
+      fixed_ips:
+        - subnet_id: { get_param: subnetCMS }
+      security_groups: [{ get_resource: server_security_group }]
+
+  server_security_group:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      description: Test group to demonstrate Neutron security group functionality with Heat.
+      name: test-security-group
+      rules: [
+        {remote_ip_prefix: 0.0.0.0/0,
+        protocol: tcp,
+        port_range_min: 22,
+        port_range_max: 22},
+        {remote_ip_prefix: 0.0.0.0/0,
+        protocol: icmp}]
+
+  server_install_new_ansible_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: script
+      config: |
+        #!/bin/bash
+        echo "deb http://ppa.launchpad.net/ansible/ansible/ubuntu xenial main" >> /etc/apt/sources.list
+        rm /var/lib/dpkg/lock
+
+        apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 93C4A3FD7BB9C367
+        apt-get update
+        apt-get -y install ansible 
+        export HOME=/root
+
+        echo "remote_tmp = /home/ubuntu/.ansible/tmp" >> /etc/ansible/ansible.cfg
+        echo "local_tmp = /home/ubuntu/.ansible/tmp" >> /etc/ansible/ansible.cfg
+ 
+  master_install_new_ansible_deploy:
+    type: OS::Heat::SoftwareDeployment
+    properties: 
+      config:
+        get_resource: server_install_new_ansible_config
+      server:
+        get_resource: mesos-master-server
+
+  slave_install_new_ansible_deploy:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      config:
+        get_resource: server_install_new_ansible_config
+      server:
+        get_resource: mesos-slave-server
+
+  lb_install_new_ansible_deploy:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      config:
+        get_resource: server_install_new_ansible_config
+      server:
+        get_resource: mesos-lb-server
+
+  mesos_slave_create_deploy:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      input_values:
+        front_end_ip:
+          get_attr:
+          - mesos-master-server
+          - networks
+          - private
+          - 0
+        enable_nfs_share:
+          get_property:
+          - SELF
+          - enable_nfs_share
+        mesos_masters_list_ips:
+          get_attr:
+          - mesos-master-server
+          - networks
+          - private
+          - 0
+      config:
+        get_resource: mesos_slave_create_config
+      server:
+        get_resource: mesos-slave-server
+    depends_on:
+    - mesos_slave_install_roles_deploy
+    - mesos-slave-server_configure_deploy 
+  mesos-slave-server:
+    type: OS::Nova::Server
+    properties:
+      name: mesos-slave-server 
+      admin_pass: admin
+      flavor: cm4.large
+      user_data_format: SOFTWARE_CONFIG
+      image: { get_param: imageCMS }
+      key_name: { get_param: key_name }
+      networks:
+      - network: { get_param: networkCMS }
+  mesos_load_balancer_create_deploy:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      input_values:
+        consul_server_ips:
+          get_attr:
+          - mesos-master-server
+          - networks
+          - private
+          - 0
+        marathon_password: test_pass
+        marathon_username: admin
+      config:
+        get_resource: mesos_load_balancer_create_config
+      server:
+        get_resource: mesos-lb-server
+    depends_on:
+    - mesos-lb-server_configure_deploy
+    - mesos_load_balancer_install_roles_deploy
+  cms_services_start_deploy:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      input_values:
+        cms_config_proxycache_host:
+          get_attr:
+          - mesos-lb-server
+          - networks
+          - private
+          - 0
+        cms_config_squid_image: spiga/frontiersquidv1
+        cms_config_iam_client_id:
+          get_param: iam_client_id
+        cms_config_cms_local_site:
+          get_param: cms_local_site
+        cms_config_iamtoken:
+          get_param: iam_token
+        marathon_user: admin
+        marathon_pass: test_pass
+        cms_config_wn_image: spiga/cmswn
+        cms_config_onedatacache:
+          get_param: onedatacache
+        cms_config_mysquid_host:
+          get_attr:
+          - mesos-lb-server
+          - networks
+          - private
+          - 0
+        cms_config_onedatatoken:
+          get_param: onedatatoken
+        cms_config_iam_client_secret:
+          get_param: iam_client_secret
+        cms_config_proxycache_image: spiga/ttscache
+      config:
+        get_resource: cms_services_start_config
+      server:
+        get_resource: mesos-master-server
+    depends_on:
+    - cms_services_install_roles_deploy
+    - mesos_master_configure_deploy
+
+  cms_wn_configure_deploy:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      input_values:
+        cms_config_proxycache_host:
+          get_attr:
+          - mesos-lb-server
+          - networks
+          - private
+          - 0
+        cms_config_stageoutserver:
+          get_param: cms_stageoutserver
+        cms_config_cms_local_site:
+          get_param: cms_local_site
+        cms_input_protocol:
+          get_param: cms_input_protocol
+        monitordb_ip:
+          get_param: monitordb_ip
+        cms_config_stageoutprefix_fallback:
+          get_param: cms_stageoutprefix_fallback
+        cms_input_path:
+          get_param: cms_input_path
+        cms_config_stageoutserver_fallback:
+          get_param: cms_stageoutserver_fallback
+        cms_config_stageoutprefix:
+          get_param: cms_stageoutprefix
+        cms_config_mysquid_host:
+          get_attr:
+          - mesos-lb-server
+          - networks
+          - private
+          - 0
+        cms_config_elastic_secret:
+          get_param: elasticsearch_secret
+        cms_config_stageoutsite:
+          get_param: cms_stageoutsite
+        cms_config_stageoutsite_fallback:
+          get_param: cms_stageoutsite_fallback
+      config:
+        get_resource: cms_wn_configure_config
+      server:
+        get_resource: mesos-slave-server
+    depends_on:
+    - cms_wn_install_roles_deploy
+    - mesos_slave_create_deploy
+
+  mesos_master_configure_deploy:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      input_values:
+        chronos_user: admin
+        marathon_enable_ssl: true
+        mesos_authenticate_http: true
+        chronos_pass: test_pass
+        enable_chronos: true
+        chronos_enable_ssl: true
+        marathon_user: admin
+        marathon_pass: test_pass
+        wn_ips:
+          get_property:
+          - SELF
+          - wn_ips
+        enable_nfs_share:
+          get_property:
+          - SELF
+          - enable_nfs_share
+        mesos_password: admin
+        mesos_username: admin
+        mesos_masters_list_ips:
+          get_attr:
+          - mesos-master-server
+          - networks
+          - private
+          - 0
+      config:
+        get_resource: mesos_master_configure_config
+      server:
+        get_resource: mesos-master-server
+    depends_on:
+    - mesos_master_install_roles_deploy
+    - mesos-master-server_configure_deploy
+  mesos-lb-server:
+    type: OS::Nova::Server
+    properties:
+      name: mesos-lb-server
+      admin_pass: admin
+      flavor: cm4.large
+      user_data_format: SOFTWARE_CONFIG
+      image: { get_param: imageCMS }
+      key_name: { get_param: key_name }
+      networks:
+      - network: { get_param: networkCMS }
+  mesos-master-server_configure_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: ansible
+      config:
+        get_file: templates_mesos/zabbix_agent_install.yml
+  mesos-master-server_configure_deploy:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      input_values:
+        zabbix_server_metadata: Linux      668c875e-9a39-4dc0-a710-17c41376c1e0
+        zabbix_server_port: 10051
+        zabbix_server: orchestrator.cloud.cnaf.infn.it 
+      config:
+        get_resource: mesos-master-server_configure_config
+      server:
+        get_resource: mesos-master-server
+    depends_on:
+    - mesos-master-server_install_roles_deploy
+  mesos-master-server_install_roles_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: script
+      config: |
+        #!/bin/bash
+        #rm /var/lib/dpkg/lock
+        ansible-galaxy install indigo-dc.zabbix-agent
+  mesos-master-server_install_roles_deploy:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      config:
+        get_resource: mesos-master-server_install_roles_config
+      server:
+        get_resource: mesos-master-server
+    depends_on:
+    - master_install_new_ansible_deploy
+  mesos_slave_create_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: ansible
+      config:
+        get_file: templates_mesos/mesos_slave_install.yml
+  mesos_slave_install_roles_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: script
+      config: |
+        #!/bin/bash
+        rm /var/lib/dpkg/lock
+        ansible-galaxy install indigo-dc.docker
+        ansible-galaxy install indigo-dc.consul
+        ansible-galaxy install indigo-dc.nfs
+        ansible-galaxy install indigo-dc.mesos
+  mesos_slave_install_roles_deploy:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      config:
+        get_resource: mesos_slave_install_roles_config
+      server:
+        get_resource: mesos-slave-server
+    depends_on:
+    - slave_install_new_ansible_deploy
+  mesos-slave-server_configure_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: ansible
+      config:
+        get_file: templates_mesos/zabbix_agent_install.yml
+  mesos-slave-server_configure_deploy:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      input_values:
+        zabbix_server_metadata: Linux      668c875e-9a39-4dc0-a710-17c41376c1e0
+        zabbix_server_port: 10051
+        zabbix_server: orchestrator.cloud.cnaf.infn.it
+      config:
+        get_resource: mesos-slave-server_configure_config
+      server:
+        get_resource: mesos-slave-server
+    depends_on:
+    - mesos-slave-server_install_roles_deploy
+  mesos-slave-server_install_roles_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: script
+      config: |
+        #!/bin/bash
+        rm /var/lib/dpkg/lock
+        ansible-galaxy install indigo-dc.zabbix-agent
+  mesos-slave-server_install_roles_deploy:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      config:
+        get_resource: mesos-slave-server_install_roles_config
+      server:
+        get_resource: mesos-slave-server
+    depends_on:
+    - slave_install_new_ansible_deploy
+  mesos_load_balancer_create_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: ansible
+      config:
+        get_file: templates_mesos/mesos_lb_install.yml
+  mesos_load_balancer_install_roles_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: script
+      config: |
+        #!/bin/bash
+        rm /var/lib/dpkg/lock
+        ansible-galaxy install indigo-dc.docker
+        ansible-galaxy install indigo-dc.consul
+        ansible-galaxy install indigo-dc.marathon-lb
+  mesos_load_balancer_install_roles_deploy:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      config:
+        get_resource: mesos_load_balancer_install_roles_config
+      server:
+        get_resource: mesos-lb-server
+    depends_on:
+    - lb_install_new_ansible_deploy
+  cms_services_start_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: ansible
+      config:
+        get_file: templates_mesos/cms_services_start.yml
+  cms_services_install_roles_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: script
+      config: |
+        #!/bin/bash
+        #rm /var/lib/dpkg/lock
+        ansible-galaxy install indigo-dc.cms_config
+  cms_services_install_roles_deploy:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      config:
+        get_resource: cms_services_install_roles_config
+      server:
+        get_resource: mesos-master-server
+    depends_on:
+    - master_install_new_ansible_deploy
+  cms_wn_configure_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: ansible
+      config:
+        get_file: templates_mesos/cms_wn_configure.yml
+  cms_wn_install_roles_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: script
+      config: |
+        #!/bin/bash
+        rm /var/lib/dpkg/lock
+        ansible-galaxy install indigo-dc.cms_config
+  cms_wn_install_roles_deploy:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      config:
+        get_resource: cms_wn_install_roles_config
+      server:
+        get_resource: mesos-slave-server
+    depends_on:
+    - slave_install_new_ansible_deploy
+  mesos_master_configure_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: ansible
+      config:
+        get_file: templates_mesos/mesos_master_install.yml
+  mesos_master_install_roles_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: script
+      config: |
+        #!/bin/bash
+        #rm /var/lib/dpkg/lock
+        ansible-galaxy install indigo-dc.consul
+        ansible-galaxy install indigo-dc.marathon
+        ansible-galaxy install indigo-dc.docker
+        ansible-galaxy install indigo-dc.zookeeper
+        ansible-galaxy install indigo-dc.mesos
+        ansible-galaxy install indigo-dc.nfs
+        ansible-galaxy install indigo-dc.chronos
+  mesos_master_install_roles_deploy:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      config:
+        get_resource: mesos_master_install_roles_config
+      server:
+        get_resource: mesos-master-server
+    depends_on:
+    - master_install_new_ansible_deploy
+  mesos-lb-server_configure_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: ansible
+      config:
+        get_file: templates_mesos/zabbix_agent_install.yml
+  mesos-lb-server_configure_deploy:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      input_values:
+        zabbix_server_metadata: Linux      668c875e-9a39-4dc0-a710-17c41376c1e0
+        zabbix_server_port: 10051
+        zabbix_server: orchestrator.cloud.cnaf.infn.it
+      config:
+        get_resource: mesos-lb-server_configure_config
+      server:
+        get_resource: mesos-lb-server
+    depends_on:
+    - mesos-lb-server_install_roles_deploy
+  mesos-lb-server_install_roles_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: script
+      config: |
+        #!/bin/bash
+        rm /var/lib/dpkg/lock
+        ansible-galaxy install indigo-dc.zabbix-agent
+  mesos-lb-server_install_roles_deploy:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      config:
+        get_resource: mesos-lb-server_install_roles_config
+      server:
+        get_resource: mesos-lb-server
+    depends_on:
+    - lb_install_new_ansible_deploy
+outputs:
+  mesos_endpoint:
+    value:
+      str_replace:
+        params:
+          $s2: :5050
+          $s0: http://
+          $s1:
+            get_attr:
+            - mesos-master-server
+            - networks
+            - private
+            - 0
+        template: $s0$s1$s2
+  mesos_lb_ip:
+    value:
+      get_attr:
+      - mesos-lb-server
+      - networks
+      - private
+      - 0
+  marathon_endpoint:
+    value:
+      str_replace:
+        params:
+          $s2: :8080
+          $s0: http://
+          $s1:
+            get_attr:
+            - mesos-master-server
+            - networks
+            - private
+            - 0
+        template: $s0$s1$s2

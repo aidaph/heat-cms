@@ -1,0 +1,324 @@
+heat_template_version: 2013-05-23
+
+description: >
+  TOSCA example for specifying a Mesos Cluster
+
+parameters:
+  cms_stageoutsite_fallback:
+    type: string
+    default: DUMMY
+  iam_token:
+    type: string
+    default: my_token
+  cms_local_site:
+    type: string
+    default: T2_ES_IFCA
+  cms_stageoutprefix_fallback:
+    type: string
+    default: DUMMY
+  imageCMS:
+    type: string
+    description: Image used to boot a server
+    default: ubuntu16-software-config-ifca
+  cms_stageoutserver:
+    type: string
+    default: srmfe01.ifca.es
+  cms_stageoutserver_fallback:
+    type: string
+    default: DUMMY
+  cms_input_path:
+    type: string
+    default: DUMMY
+  elasticsearch_secret:
+    type: string
+    default: 5z0O87gnSf
+  onedatacache:
+    type: string
+    default: 160.44.194.19
+  onedatatoken:
+    type: string
+    default: DUMMYTOKEN
+  cms_stageoutsite:
+    type: string
+    default: T2_ES_IFCA
+  cms_input_protocol:
+    type: string
+    default: xrootd
+  monitordb_ip:
+    type: string
+    default: 193.205.222.247:8080
+  iam_client_secret:
+    type: string
+    default: myclient_secret
+  iam_client_id:
+    type: string
+    default: myclient_id
+  cms_stageoutprefix:
+    type: string
+    default: srm://srmfe02.ifca.es:8444/srm/managerv2?SFN=/cmsdisk/
+  networkCMS:
+    type: string
+    description: Network ID for the servers
+    default: 2b729f05-cda2-4316-bab6-4247aa06d708
+  subnetCMS:
+    type: string
+    description: Sub Network ID for the servers
+    default: daac11bd-9f18-4256-a22d-faa2939b221e
+  key_name:
+    type: string
+    description: Name of keypair to assign to servers
+    default: heat-proxy
+  flavor_master:
+    type: string
+    description: flavor to use when booting the master
+    default: cm4.xlarge
+  flavor_slave:
+    type: string
+    description: flavor to use when booting the slave
+    default: cm4.large
+  flavor_lb:
+    type: string
+    description: flavor to use when booting the load balancer
+    default: cm4.large
+ 
+resources:
+
+  ###########################################################
+  # 
+  # Security groups 
+  #
+  ###########################################################
+  server_security_group:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      description: Security Group to allow traffic into the server.
+      name: security-group-ssh
+      rules: [
+        {remote_ip_prefix: 0.0.0.0/0,
+        protocol: tcp,
+        port_range_min: 22,
+        port_range_max: 22},
+        {remote_ip_prefix: 0.0.0.0/0,
+        protocol: icmp}]  
+
+  mesos_security_group:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      description: Security group for mesos access
+      name: security-group-mesos
+      rules:
+        - protocol: tcp
+          port_range_min: 5050
+          port_range_max: 5050
+        - protocol: tcp
+          port_range_min: 8443
+          port_range_max: 8443
+        - protocol: tcp
+          port_range_min: 4443
+          port_range_max: 4443
+        - protocol: tcp
+          port_range_min: 8080
+          port_range_max: 8080
+
+  secgroup_all_open:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      rules:
+        - protocol: icmp
+        - protocol: tcp
+        - protocol: udp
+  
+  vip_port:
+    type: OS::Neutron::Port
+    properties:
+      network: {get_param: networkCMS}
+      security_groups:
+        - get_resource: secgroup_all_open
+      replacement_policy: AUTO
+
+  ##########################################################
+  #
+  # Ansible setup
+  #
+  ##########################################################
+  ansible_setup_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: script
+      inputs: 
+      - name: role_list
+        type: CommaDelimitedList
+      config: { get_file: 'templates_mesos/setup_ansible.sh' }
+
+
+  ##########################################################
+  #
+  # Mesos Config
+  #
+  ##########################################################
+  mesos-master_config:
+    type: OS::Heat::SoftwareConfig
+    properties: 
+      group: ansible
+      inputs: 
+    #    - name: mesos_masters_list
+    #      type: CommaDelimitedList
+        - name: consul_servers_list
+        - name: zookeeper_host_list
+        - name: zookeeper_peers
+        - name: marathon_username
+        - name: marathon_password
+        - name: enable_chronos
+      config: |
+              ---
+              - hosts: localhost
+                vars: 
+                  docker_bridge_ip: "172.0.17.1"
+                connection: local
+                pre_tasks: 
+                  - name: Fix /etc/hosts
+                    lineinfile: dest=/etc/hosts regexp='^127\.0\.1\.1' line="{{ ansible_default_ipv4.address }}\t{{ansible_fqdn}} {{ ansible_hostname }}"
+                  - name: Update /etc/hosts
+                    lineinfile:  dest=/etc/hosts  line="{{ ansible_default_ipv4.address }}\t{{ansible_fqdn}} {{ ansible_hostname }}"
+                roles:
+                  - { role: aidaph.consul, consul_mode: "server" }
+                  - { role: indigo-dc.zookeeper }
+                  - { role: indigo-dc.mesos, mesos_install_moe: "master" }
+                  - { role: indigo-dc.marathon }
+
+  mesos-slave_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: ansible
+      inputs:
+      
+
+  ##########################################################
+  #
+  # Mesos Master Deployment
+  #
+  ##########################################################
+  # Mesos Master
+  mesos-master-server:
+    type: OS::Nova::Server
+    properties:
+      name: mesos-master-server
+      flavor: { get_param: flavor_master }
+      user_data_format: SOFTWARE_CONFIG
+      image: { get_param: imageCMS }
+      key_name: { get_param: key_name }
+      networks:
+        - port: { get_resource: server_port }
+  server_port:
+    type: OS::Neutron::Port
+    properties:
+      network_id: { get_param: networkCMS }
+      fixed_ips:
+        - subnet_id: { get_param: subnetCMS }
+      security_groups:
+        - { get_resource: server_security_group }
+        - { get_resource: mesos_security_group }
+
+  # Install new ansible version and roles
+  mesos-master_deployment_ansible:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      input_values:
+        role_list: "consul,zookeeper,mesos,marathon,cms_config"
+      config: 
+        get_resource: ansible_setup_config
+      server:
+        get_resource: mesos-master-server
+     
+  mesos-master_deployment:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      input_values:
+        enable_chronos: false
+        marathon_username: test_user
+        marathon_pass: test_pass
+        mesos_password: admin
+        mesos_username: admin
+        mesos_masters_list:
+          get_attr:
+          - mesos-master-server
+          - networks
+          - private
+          - 0
+        consul_servers: "{{mesos_masters_list}}"
+        zookeeper_host_list: "{{mesos_masters_list}}"
+        zookeeper_peers: "{{mesos_masters_list}}"
+      config:
+        get_resource: mesos-master_config
+      server:
+        get_resource: mesos-master-server
+    depends_on:
+    - mesos-master_deployment_ansible
+
+  ##########################################################
+  #
+  # CMS Services Config in Master
+  #
+  ##########################################################
+  # Config
+  cms_services_config: 
+    type: OS::Heat::SoftwareConfig
+    properties: 
+      group: ansible
+      inputs: 
+        - name: cms_config_mysquid_host
+        - name: cms_config_proxycache_host
+        - name: cms_config_iamtoken
+        - name: cms_config_iam_client_id
+        - name: cms_config_iam_client_secret
+        - name: cms_config_cms_local_site
+        - name: cms_config_squid_image
+        - name: cms_config_wn_image
+        - name: cms_config_proxycache_image
+        - name: cms_config_onedatacache
+        - name: cms_config_onedatatoken
+        - name: marathon_username
+        - name: marathon_password 
+      config: |
+              ---
+              - hosts: localhost
+                vars:
+                connection: local
+                roles:
+                - { role: indigo-dc.cms_config }
+
+  #Deployment
+  cms_services_deployment:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      input_values:
+        cms_config_mysquid_host: 
+          get_attr:
+          - vip_port
+          - fixed_ips
+          - 0
+          - ip_address 
+        cms_config_proxycache_host: "{{ cms_config_mysquid_host}}"
+        cms_config_squid_image: spiga/frontiersquidv1
+        cms_config_cms_local_site:
+          get_param: cms_local_site
+        cms_config_iam_client_id:
+          get_param: iam_client_id
+        cms_config_iam_client_secret:
+          get_param: iam_client_secret
+        cms_config_iamtoken:
+          get_param: iam_token
+        marathon_user: admin
+        marathon_pass: test_pass
+        cms_config_wn_image: spiga/cmswn
+        cms_config_onedatacache:
+          get_param: onedatacache
+        cms_config_onedatatoken:
+          get_param: onedatatoken
+        cms_config_proxycache_image: spiga/ttscache
+      config:
+        get_resource: cms_services_config
+      server:
+        get_resource: mesos-master-server
+    depends_on:
+    - mesos-master_deployment 
