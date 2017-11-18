@@ -104,11 +104,9 @@ parameters:
   marathon_username:
     type: string
     description: username to access Marathon endpoint
-    default: admin
   marathon_password:
     type: string
     description: password to access Marathon endpoint
-    default: admin
   monitor_ip:
     type: string
     default: "193.205.222.247:8080"
